@@ -17,8 +17,10 @@ import os from 'os';
  * The tool preserves reasoning text without modification, creating a dedicated
  * space for structured thinking during complex tasks.
  * 
- * Enhanced with persistent session storage to maintain thinking context
- * across device restarts and long periods of time.
+ * Enhanced with:
+ * - Persistent session storage to maintain thinking context across device restarts
+ * - Smart Context Injection for builds_on relationships (automatically surfaces
+ *   reasoning chains, conflicting thoughts, and supporting evidence)
  */
 
 // Session storage directory - allow override via environment variable for testing
@@ -110,7 +112,7 @@ async function cleanupOldSessions(maxAgeDays = 90) {
 // Create MCP server instance
 const server = new McpServer({
   name: "minimal-think-mcp",
-  version: "1.2.3"
+  version: "1.2.4"
 });
 
 // Register the enhanced think tool with persistent sessions and relationship tracking
@@ -221,9 +223,32 @@ server.registerTool(
           related_mode: related_thought.mode
         };
         
-        // Special treatment for builds_on - show the reasoning chain
+        // context injection for builds_on relationships
         if (relationship_type === 'builds_on') {
-          reasoning_chain = buildReasoningChain(relates_to, thoughts);
+            const chain = buildReasoningChain(relates_to, thoughts);
+            
+            // Find conflicting thoughts (max 3)
+            const conflicts = thoughts.filter(t => 
+                t.relationships_out.some(rel => 
+                    rel.thought_id === relates_to && rel.relationship_type === 'contradicts'
+                )
+            ).slice(0, 3);
+            
+            // Find supporting evidence (max 3)
+            const supports = thoughts.filter(t => 
+                t.relationships_out.some(rel => 
+                    rel.thought_id === relates_to && rel.relationship_type === 'supports'
+                )
+            ).slice(0, 3);
+            
+            // Build enhanced context object
+            related_context = {
+                type: 'builds_on_enhanced',
+                chain_preview: chain.chain.slice(0, 5).map(t => t.content_preview),
+                conflicts: conflicts.map(t => t.content.substring(0, 80) + "..."),
+                supports: supports.map(t => t.content.substring(0, 80) + "...")
+            };
+            reasoning_chain = chain; // maintain backward compatibility
         }
       }
     }

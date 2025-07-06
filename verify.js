@@ -59,10 +59,10 @@ try {
   }
   
   // Check version
-  if (packageJson.version === '1.2.3') {
-    console.log('✅ Version is 1.2.3');
+  if (packageJson.version === '1.2.4') {
+    console.log('✅ Version is 1.2.4');
   } else {
-    console.log(`❌ Version should be 1.2.3, found ${packageJson.version}`);
+    console.log(`❌ Version should be 1.2.4, found ${packageJson.version}`);
   }
   
   // Check binary
