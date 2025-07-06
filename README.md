@@ -3,6 +3,7 @@
 A high-performance JavaScript native MCP server implementing a minimal "think" tool with zero cognitive interference and persistent sessions. Based on [Anthropic's research](https://www.anthropic.com/engineering/claude-think-tool) on enhancing Claude's complex problem-solving abilities through dedicated thinking workspaces.
 
 npm: https://www.npmjs.com/package/minimal-think-mcp
+<br>
 git: https://github.com/differentstuff/minimal-think-mcp
 
 ## Overview
