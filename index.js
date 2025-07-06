@@ -126,19 +126,22 @@ server.registerTool(
       setAsDefault: z.boolean().optional().default(false).describe("Set this session as the default for future thinking"),
       mode: z.enum(["linear", "creative", "critical", "strategic", "empathetic"]).optional()
         .describe("Optional thinking mode to structure your reasoning"),
-      tags: z.array(z.string()).optional().describe("Optional tags for categorizing thoughts")
+      tags: z.array(z.string()).optional().describe("Optional tags for categorizing thoughts"),
+      newChat: z.boolean().optional().default(false).describe("Force a new session even if sessionId is provided")
     }
   },
-  async ({ reasoning, sessionId, useDefaultSession, setAsDefault, mode, tags }) => {
+  async ({ reasoning, sessionId, useDefaultSession, setAsDefault, mode, tags, newChat }) => {
     // Ensure session directory exists
     await ensureSessionDir();
     
     // Determine session ID logic:
-    // 1. If sessionId is provided, use that (highest priority)
-    // 2. If useDefaultSession is true, try to get default session
-    // 3. If no default session or useDefaultSession is false, create new session
-    let session = sessionId;
+    // 1. If newChat is true, always create a new session
+    // 2. If sessionId is provided and newChat is false, use that (highest priority)
+    // 3. If useDefaultSession is true, try to get default session
+    // 4. If no default session or useDefaultSession is false, create new session
+    let session = newChat ? null : sessionId;
     let usedDefaultSession = false;
+    let isNewSession = false;
     
     if (!session && useDefaultSession) {
       session = await getDefaultSession();
@@ -148,6 +151,7 @@ server.registerTool(
     // If we still don't have a session ID, generate a new one
     if (!session) {
       session = `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      isNewSession = true;
     }
     
     // Load existing thoughts for this session
@@ -171,8 +175,8 @@ server.registerTool(
       await setDefaultSession(session);
     }
     
-    // Return with session context
-    const response = {
+    // Generate the response JSON
+    const responseJson = {
       thinking: reasoning,
       thoughtId: thoughtId,
       sessionId: session,
@@ -182,13 +186,28 @@ server.registerTool(
       thoughtCount: thoughts.length,
       preserved: true,
       usingDefaultSession: usedDefaultSession,
-      isDefaultSession: setAsDefault || usedDefaultSession
+      isDefaultSession: setAsDefault || usedDefaultSession,
+      isNewSession: isNewSession
     };
+    
+    // Create a note for Claude about session continuity
+    const claudeNote = `
+<!-- 
+Session ID: ${session}
+In this chat, I should automatically include this session ID in future "think" tool calls 
+unless instructed to start a new session or use a different session.
 
+For future think tool calls in this chat, I'll use:
+{
+  "reasoning": "...",
+  "sessionId": "${session}"
+}
+-->`;
+    
     return {
       content: [{
         type: "text",
-        text: JSON.stringify(response, null, 2)
+        text: JSON.stringify(responseJson, null, 2) + claudeNote
       }]
     };
   }
@@ -242,15 +261,17 @@ server.registerTool(
           }
         }));
       
+      const responseJson = {
+        sessions: sessionInfo,
+        count: sessionInfo.length,
+        defaultSessionId,
+        timestamp: new Date().toISOString()
+      };
+      
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            sessions: sessionInfo,
-            count: sessionInfo.length,
-            defaultSessionId,
-            timestamp: new Date().toISOString()
-          }, null, 2)
+          text: JSON.stringify(responseJson, null, 2)
         }]
       };
     } catch (error) {
@@ -303,16 +324,25 @@ server.registerTool(
       
       const thoughts = await loadSession(session);
       
+      const responseJson = {
+        sessionId: session,
+        thoughts,
+        count: thoughts.length,
+        timestamp: new Date().toISOString(),
+        usingDefaultSession: usedDefaultSession
+      };
+      
+      // Create a note for Claude about session continuity
+      const claudeNote = `
+<!-- 
+Session ID: ${session}
+I now know about this session and should use it if the user wants to continue this thinking process.
+-->`;
+      
       return {
         content: [{
           type: "text",
-          text: JSON.stringify({
-            sessionId: session,
-            thoughts,
-            count: thoughts.length,
-            timestamp: new Date().toISOString(),
-            usingDefaultSession: usedDefaultSession
-          }, null, 2)
+          text: JSON.stringify(responseJson, null, 2) + claudeNote
         }]
       };
     } catch (error) {
