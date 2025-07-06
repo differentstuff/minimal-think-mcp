@@ -110,15 +110,15 @@ async function cleanupOldSessions(maxAgeDays = 90) {
 // Create MCP server instance
 const server = new McpServer({
   name: "minimal-think-mcp",
-  version: "1.2.0"
+  version: "1.2.3"
 });
 
-// Register the enhanced think tool with persistent sessions
+// Register the enhanced think tool with persistent sessions and relationship tracking
 server.registerTool(
   "think",
   {
     title: "Think Tool",
-    description: "A persistent thinking workspace that preserves reasoning across sessions. Creates dedicated space for structured thinking during complex tasks.",
+    description: "A persistent thinking workspace that preserves reasoning across sessions. Creates dedicated space for structured thinking during complex tasks with relationship tracking.",
     inputSchema: {
       reasoning: z.string().describe("Your thinking, reasoning, or analysis text"),
       sessionId: z.string().optional().describe("Session ID to continue an existing thinking process"),
@@ -127,10 +127,12 @@ server.registerTool(
       mode: z.enum(["linear", "creative", "critical", "strategic", "empathetic"]).optional()
         .describe("Optional thinking mode to structure your reasoning"),
       tags: z.array(z.string()).optional().describe("Optional tags for categorizing thoughts"),
-      newChat: z.boolean().optional().default(false).describe("Force a new session even if sessionId is provided")
+      newChat: z.boolean().optional().default(false).describe("Force a new session even if sessionId is provided"),
+      relates_to: z.string().optional().describe("ID of thought this relates to"),
+      relationship_type: z.enum(["builds_on", "supports", "contradicts", "refines", "synthesizes"]).optional().describe("Type of relationship to the referenced thought")
     }
   },
-  async ({ reasoning, sessionId, useDefaultSession, setAsDefault, mode, tags, newChat }) => {
+  async ({ reasoning, sessionId, useDefaultSession, setAsDefault, mode, tags, newChat, relates_to, relationship_type }) => {
     // Ensure session directory exists
     await ensureSessionDir();
     
@@ -158,14 +160,44 @@ server.registerTool(
     const thoughts = await loadSession(session);
     
     // Add new thought
-    const thoughtId = thoughts.length + 1;
-    thoughts.push({
+    const thoughtId = `thought_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const thoughtObj = {
       id: thoughtId,
       content: reasoning,
       mode: mode || "linear",
       tags: tags || [],
-      timestamp: new Date().toISOString()
-    });
+      timestamp: new Date().toISOString(),
+      relates_to: null,
+      relationship_type: null,
+      relationships_in: [], // thoughts that reference this thought
+      relationships_out: []  // thoughts this thought references
+    };
+
+    // Validate and add relationship tracking
+    if (relates_to && relationship_type) {
+      // Prevent self-reference
+      if (relates_to === thoughtId) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot reference self" }) }] };
+      }
+      
+      const referencedThought = thoughts.find(t => t.id === relates_to);
+      if (!referencedThought) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Referenced thought not found", thought_id: relates_to }) }] };
+      }
+      
+      // Refined temporal check - compare to current thought's timestamp
+      if (new Date(referencedThought.timestamp) > new Date(thoughtObj.timestamp)) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "Cannot reference future thoughts" }) }] };
+      }
+      
+      // Now use the same referencedThought for relationship tracking
+      referencedThought.relationships_in.push({ thought_id: thoughtId, relationship_type });
+      thoughtObj.relationships_out.push({ thought_id: relates_to, relationship_type });
+      thoughtObj.relates_to = relates_to;
+      thoughtObj.relationship_type = relationship_type;
+    }
+
+    thoughts.push(thoughtObj);
     
     // Save updated session
     await saveSession(session, thoughts);
@@ -173,6 +205,27 @@ server.registerTool(
     // Set as default if requested
     if (setAsDefault) {
       await setDefaultSession(session);
+    }
+    
+    // Add related thought context for AI
+    let related_context = null;
+    let reasoning_chain = null;
+    
+    if (relates_to && relationship_type) {
+      const related_thought = thoughts.find(t => t.id === relates_to);
+      if (related_thought) {
+        related_context = {
+          relationship: relationship_type,
+          related_thought_id: relates_to,
+          related_content: related_thought.content.substring(0, 200) + "...",
+          related_mode: related_thought.mode
+        };
+        
+        // Special treatment for builds_on - show the reasoning chain
+        if (relationship_type === 'builds_on') {
+          reasoning_chain = buildReasoningChain(relates_to, thoughts);
+        }
+      }
     }
     
     // Generate the response JSON
@@ -185,6 +238,8 @@ server.registerTool(
       timestamp: new Date().toISOString(),
       thoughtCount: thoughts.length,
       preserved: true,
+      related_context: related_context,
+      reasoning_chain: reasoning_chain,
       usingDefaultSession: usedDefaultSession,
       isDefaultSession: setAsDefault || usedDefaultSession,
       isNewSession: isNewSession
@@ -528,6 +583,185 @@ server.registerTool(
     }
   }
 );
+
+// Find thought relationships tool - helps AI discover related thoughts efficiently
+server.registerTool(
+  "find_thought_relationships",
+  {
+    title: "Find Thought Relationships",
+    description: "Search for thoughts that could be related to current reasoning, helping AI build coherent argument chains",
+    inputSchema: {
+      query: z.string().describe("Search query to find related thoughts (searches content, tags, and modes)"),
+      sessionId: z.string().optional().describe("Session ID to search in. If not provided, the default session will be used if available."),
+      relationship_types: z.array(z.enum(["builds_on", "supports", "contradicts", "refines", "synthesizes"])).optional().describe("Filter by specific relationship types"),
+      exclude_thought_id: z.string().optional().describe("Exclude a specific thought ID from results (useful to avoid self-reference)"),
+      limit: z.number().min(1).max(20).default(10).describe("Maximum number of results to return")
+    }
+  },
+  async ({ query, sessionId, relationship_types, exclude_thought_id, limit }) => {
+    try {
+      await ensureSessionDir();
+      
+      // Determine session to use
+      let session = sessionId;
+      if (!session) {
+        session = await getDefaultSession();
+        if (!session) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "No session ID provided and no default session set" }) }] };
+        }
+      }
+      
+      const thoughts = await loadSession(session);
+      
+      if (thoughts.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ results: [], total: 0, query: query }) }] };
+      }
+      
+      // Search logic
+      const queryLower = query.toLowerCase();
+      const searchResults = thoughts
+        .filter(t => {
+          // Exclude specific thought if requested
+          if (exclude_thought_id && t.id === exclude_thought_id) return false;
+          
+          // Filter by relationship types if specified
+          if (relationship_types && relationship_types.length > 0) {
+            if (!t.relationship_type || !relationship_types.includes(t.relationship_type)) return false;
+          }
+          
+          // Search in content, tags, and mode
+          const contentMatch = t.content.toLowerCase().includes(queryLower);
+          const tagMatch = t.tags && t.tags.some(tag => tag.toLowerCase().includes(queryLower));
+          const modeMatch = t.mode && t.mode.toLowerCase().includes(queryLower);
+          
+          return contentMatch || tagMatch || modeMatch;
+        })
+        .map(t => ({
+          id: t.id,
+          content_preview: t.content.substring(0, 150) + (t.content.length > 150 ? "..." : ""),
+          mode: t.mode,
+          tags: t.tags,
+          timestamp: t.timestamp,
+          relates_to: t.relates_to,
+          relationship_type: t.relationship_type,
+          // Calculate relevance score (simple scoring)
+          relevance_score: calculateRelevanceScore(t, queryLower)
+        }))
+        .sort((a, b) => b.relevance_score - a.relevance_score)
+        .slice(0, limit);
+      
+      const response = {
+        results: searchResults,
+        total: searchResults.length,
+        query: query,
+        sessionId: session,
+        searched_thoughts: thoughts.length
+      };
+      
+      return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+      
+    } catch (error) {
+      console.error('Failed to find thought relationships:', error);
+      return { content: [{ type: "text", text: JSON.stringify({ error: "Failed to find relationships", message: error.message }) }] };
+    }
+  }
+);
+
+// Simple relevance scoring function
+function calculateRelevanceScore(thought, queryLower) {
+  let score = 0;
+  const content = thought.content.toLowerCase();
+  
+  // Exact phrase match gets highest score
+  if (content.includes(queryLower)) {
+    score += 10;
+  }
+  
+  // Word matches
+  const queryWords = queryLower.split(/\s+/);
+  queryWords.forEach(word => {
+    if (content.includes(word)) {
+      score += 2;
+    }
+  });
+  
+  // Tag matches
+  if (thought.tags) {
+    thought.tags.forEach(tag => {
+      if (tag.toLowerCase().includes(queryLower)) {
+        score += 5;
+      }
+    });
+  }
+  
+  // Mode match
+  if (thought.mode && thought.mode.toLowerCase().includes(queryLower)) {
+    score += 3;
+  }
+  
+  // Boost score for thoughts with relationships (they're part of reasoning chains)
+  if (thought.relates_to || thought.relationship_type) {
+    score += 1;
+  }
+  
+  return score;
+}
+
+// Build reasoning chain for "builds_on" relationships
+// Traces back the chain of thoughts that build on each other
+// Returns: [foundation_thought] → [building_thought] → [current_thought]
+function buildReasoningChain(thoughtId, thoughts) {
+  const chain = [];
+  const visited = new Set(); // Prevent infinite loops
+  let currentId = thoughtId;
+  
+  // Trace backwards through the builds_on chain
+  while (currentId && !visited.has(currentId) && chain.length < 20) {
+    visited.add(currentId);
+    const thought = thoughts.find(t => t.id === currentId);
+    
+    if (!thought) break;
+    
+    // Add to front of chain (we're going backwards)
+    chain.unshift({
+      id: thought.id,
+      content_preview: thought.content.substring(0, 120) + (thought.content.length > 120 ? "..." : ""),
+      mode: thought.mode,
+      timestamp: thought.timestamp,
+      relationship_type: thought.relationship_type
+    });
+    
+    // Continue tracing if this thought builds on another
+    if (thought.relationship_type === 'builds_on' && thought.relates_to) {
+      currentId = thought.relates_to;
+    } else {
+      break;
+    }
+  }
+  
+  // Limit chain length to respect working memory constraints (7±2 items)
+  const maxChainLength = 7;
+  if (chain.length > maxChainLength) {
+    // Keep the most recent items and add an indicator for truncation
+    const truncatedChain = chain.slice(-maxChainLength);
+    truncatedChain[0] = {
+      ...truncatedChain[0],
+      truncated: true,
+      note: `... (${chain.length - maxChainLength} earlier thoughts in chain)`
+    };
+    return {
+      chain: truncatedChain,
+      total_length: chain.length,
+      truncated: true
+    };
+  }
+  
+  return {
+    chain: chain,
+    total_length: chain.length,
+    truncated: false
+  };
+}
 
 // Error handling
 process.on('uncaughtException', (error) => {
