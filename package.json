@@ -1,7 +1,7 @@
 {
   "name": "minimal-think-mcp",
-  "version": "1.0.0",
-  "description": "A minimal MCP server implementing a pure thinking workspace tool with zero cognitive interference",
+  "version": "1.2.0",
+  "description": "A minimal MCP server implementing a persistent thinking workspace tool with zero cognitive interference and default session support",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -19,7 +19,12 @@
     "reasoning",
     "workspace",
     "anthropic",
-    "claude"
+    "claude",
+    "persistent",
+    "sessions",
+    "thinking-modes",
+    "default-session",
+    "cross-chat"
   ],
   "author": "differentstuff",
   "license": "MIT",
